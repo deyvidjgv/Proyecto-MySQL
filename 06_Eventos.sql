@@ -12,6 +12,14 @@ USE ecommerce_db;
 -- =============================================================================
 SET GLOBAL event_scheduler = ON;
 
+-- IMPORTANTE: todos los eventos se programan con
+--     STARTS CURRENT_TIMESTAMP + INTERVAL <1 DAY | 1 HOUR>
+-- y NO con 'STARTS CURRENT_TIMESTAMP' a secas. Un evento que arranca en el
+-- instante de su creación se ejecuta de inmediato: las tareas de purga
+-- (visitas_productos, carritos_abandonados, clientes inactivos) borrarían los
+-- datos de prueba nada más instalar el script y las consultas 10 y 18 de
+-- 02_Consultas_Avanzadas.sql devolverían vacío.
+
 -- =============================================================================
 -- 2. TABLAS DE SOPORTE PARA EVENTOS PROGRAMADOS
 -- =============================================================================
@@ -79,7 +87,7 @@ DELIMITER //
 DROP EVENT IF EXISTS evt_generate_weekly_sales_report //
 CREATE EVENT evt_generate_weekly_sales_report
 ON SCHEDULE EVERY 1 WEEK
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -108,7 +116,7 @@ END //
 DROP EVENT IF EXISTS evt_cleanup_temp_tables_daily //
 CREATE EVENT evt_cleanup_temp_tables_daily
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -124,7 +132,7 @@ END //
 DROP EVENT IF EXISTS evt_archive_old_logs_monthly //
 CREATE EVENT evt_archive_old_logs_monthly
 ON SCHEDULE EVERY 1 MONTH
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -140,7 +148,7 @@ END //
 DROP EVENT IF EXISTS evt_deactivate_expired_promotions_hourly //
 CREATE EVENT evt_deactivate_expired_promotions_hourly
 ON SCHEDULE EVERY 1 HOUR
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 HOUR
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -157,7 +165,7 @@ END //
 DROP EVENT IF EXISTS evt_recalculate_customer_loyalty_tiers_nightly //
 CREATE EVENT evt_recalculate_customer_loyalty_tiers_nightly
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -177,7 +185,7 @@ END //
 DROP EVENT IF EXISTS evt_generate_reorder_list_daily //
 CREATE EVENT evt_generate_reorder_list_daily
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -201,11 +209,15 @@ END //
 -- -----------------------------------------------------------------------------
 -- 7. evt_rebuild_indexes_weekly
 -- Optimiza las tablas más transaccionales para desfragmentar índices.
+-- NOTA: en InnoDB, OPTIMIZE TABLE no "reconstruye índices" al estilo de otros
+-- motores: ejecuta un ALTER TABLE ... FORCE (rebuild completo de la tabla) y
+-- recalcula estadísticas, bloqueando la tabla durante la operación. Para el
+-- refresco ligero de estadísticas basta ANALYZE TABLE.
 -- -----------------------------------------------------------------------------
 DROP EVENT IF EXISTS evt_rebuild_indexes_weekly //
 CREATE EVENT evt_rebuild_indexes_weekly
 ON SCHEDULE EVERY 1 WEEK
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -220,7 +232,7 @@ END //
 DROP EVENT IF EXISTS evt_suspend_inactive_accounts_quarterly //
 CREATE EVENT evt_suspend_inactive_accounts_quarterly
 ON SCHEDULE EVERY 3 MONTH
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -238,7 +250,7 @@ END //
 DROP EVENT IF EXISTS evt_aggregate_daily_sales_data //
 CREATE EVENT evt_aggregate_daily_sales_data
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -264,7 +276,7 @@ END //
 DROP EVENT IF EXISTS evt_check_data_consistency_nightly //
 CREATE EVENT evt_check_data_consistency_nightly
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -277,7 +289,13 @@ BEGIN
         NOW()
     FROM ventas v
     LEFT JOIN detalle_ventas dv ON v.id_venta = dv.id_venta
-    WHERE dv.id_detalle IS NULL;
+    WHERE dv.id_detalle IS NULL
+      -- Evita reinsertar cada noche la misma inconsistencia ya reportada.
+      AND NOT EXISTS (
+          SELECT 1 FROM auditoria_inconsistencias ai
+          WHERE ai.tipo = 'Venta sin líneas de detalle'
+            AND ai.descripcion = CONCAT('La orden ID ', v.id_venta, ' no contiene ningún producto asociado.')
+      );
 END //
 
 -- -----------------------------------------------------------------------------
@@ -287,7 +305,7 @@ END //
 DROP EVENT IF EXISTS evt_send_birthday_greetings_daily //
 CREATE EVENT evt_send_birthday_greetings_daily
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -314,7 +332,7 @@ END //
 DROP EVENT IF EXISTS evt_update_product_rankings_hourly //
 CREATE EVENT evt_update_product_rankings_hourly
 ON SCHEDULE EVERY 1 HOUR
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 HOUR
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -330,6 +348,8 @@ BEGIN
     FROM productos p
     LEFT JOIN detalle_ventas dv ON p.id_producto = dv.id_producto
     GROUP BY p.id_producto
+    -- 'LIMIT 20' sin ORDER BY devuelve 20 filas ARBITRARIAS, no el top 20.
+    ORDER BY total_vendido DESC
     LIMIT 20;
 END //
 
@@ -340,7 +360,7 @@ END //
 DROP EVENT IF EXISTS evt_backup_critical_tables_daily //
 CREATE EVENT evt_backup_critical_tables_daily
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -356,7 +376,7 @@ END //
 DROP EVENT IF EXISTS evt_clear_abandoned_carts_daily //
 CREATE EVENT evt_clear_abandoned_carts_daily
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -373,7 +393,7 @@ END //
 DROP EVENT IF EXISTS evt_calculate_monthly_kpis //
 CREATE EVENT evt_calculate_monthly_kpis
 ON SCHEDULE EVERY 1 MONTH
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -408,7 +428,7 @@ END //
 DROP EVENT IF EXISTS evt_refresh_materialized_views_nightly //
 CREATE EVENT evt_refresh_materialized_views_nightly
 ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -435,7 +455,7 @@ END //
 DROP EVENT IF EXISTS evt_log_database_size_weekly //
 CREATE EVENT evt_log_database_size_weekly
 ON SCHEDULE EVERY 1 WEEK
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -455,7 +475,7 @@ END //
 DROP EVENT IF EXISTS evt_detect_fraudulent_activity_hourly //
 CREATE EVENT evt_detect_fraudulent_activity_hourly
 ON SCHEDULE EVERY 1 HOUR
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 HOUR
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -479,7 +499,7 @@ END //
 DROP EVENT IF EXISTS evt_generate_supplier_performance_report_monthly //
 CREATE EVENT evt_generate_supplier_performance_report_monthly
 ON SCHEDULE EVERY 1 MONTH
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO
@@ -514,7 +534,7 @@ END //
 DROP EVENT IF EXISTS evt_purge_soft_deleted_records_weekly //
 CREATE EVENT evt_purge_soft_deleted_records_weekly
 ON SCHEDULE EVERY 1 WEEK
-STARTS CURRENT_TIMESTAMP
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY
 ON COMPLETION PRESERVE
 ENABLE
 DO

@@ -97,6 +97,10 @@ SET DEFAULT ROLE 'Atencion_Cliente' FOR 'support_user'@'localhost';
 -- permisos SELECT sobre las tablas autorizadas, excluyendo DELETE y DROP.
 -- -----------------------------------------------------------------------------
 -- (Garantizado por diseño: 'Analista_Datos' no posee permisos DELETE ni DROP)
+-- Se dejan además los REVOKE explícitos para que la intención quede auditable
+-- y para blindar el rol frente a cualquier GRANT posterior por error.
+-- 'IF EXISTS' (MySQL 8.0.16+) evita el ERROR 1141 si el privilegio nunca se otorgó.
+REVOKE IF EXISTS DELETE, DROP ON ecommerce_db.* FROM 'Analista_Datos';
 
 -- -----------------------------------------------------------------------------
 -- 12. Otorgar al rol Gerente_Marketing permiso de ejecución de procedimientos.
@@ -128,7 +132,34 @@ REVOKE UPDATE (precio) ON ecommerce_db.productos FROM 'Empleado_Inventario';
 
 -- -----------------------------------------------------------------------------
 -- 15. Implementar política de contraseñas seguras y expiración periódica.
+--     La expiración por sí sola NO es una política: hay que activar el componente
+--     validate_password, que es quien impone longitud y composición mínimas.
 -- -----------------------------------------------------------------------------
+-- Activación IDEMPOTENTE del validador: 'INSTALL COMPONENT' a secas falla con
+-- ERROR 3529 si el componente ya está instalado y abortaría el script completo.
+SET @vp_instalado := (
+    SELECT COUNT(*) FROM mysql.component
+    WHERE component_urn = 'file://component_validate_password'
+);
+SET @sql_vp := IF(@vp_instalado = 0,
+                  "INSTALL COMPONENT 'file://component_validate_password'",
+                  "DO 0");
+PREPARE stmt_vp FROM @sql_vp;
+EXECUTE stmt_vp;
+DEALLOCATE PREPARE stmt_vp;
+
+SET GLOBAL validate_password.policy           = STRONG;  -- longitud + mayús/minús + dígito + especial + diccionario
+SET GLOBAL validate_password.length           = 12;
+SET GLOBAL validate_password.mixed_case_count = 1;
+SET GLOBAL validate_password.number_count     = 1;
+SET GLOBAL validate_password.special_char_count = 1;
+
+-- Bloqueo temporal de la cuenta tras 3 intentos fallidos (requiere MySQL 8.0.19+).
+ALTER USER 'admin_user'@'localhost'     FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
+ALTER USER 'marketing_user'@'localhost' FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
+ALTER USER 'inventory_user'@'localhost' FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
+ALTER USER 'support_user'@'localhost'   FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
+
 ALTER USER 'admin_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY;
 ALTER USER 'marketing_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY;
 ALTER USER 'inventory_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY;
@@ -136,9 +167,11 @@ ALTER USER 'support_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY;
 
 -- -----------------------------------------------------------------------------
 -- 16. Asegurar que el usuario root no pueda ser usado desde conexiones remotas.
+--     NOTA: se usa DROP USER (DDL soportado) y NO 'DELETE FROM mysql.user'.
+--     Manipular las tablas de privilegios con DML directo esta desaconsejado y
+--     puede corromper el diccionario de datos en MySQL 8.
 -- -----------------------------------------------------------------------------
 DROP USER IF EXISTS 'root'@'%';
-DELETE FROM mysql.user WHERE User = 'root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 FLUSH PRIVILEGES;
 
 -- -----------------------------------------------------------------------------
@@ -174,7 +207,13 @@ INSERT INTO asignacion_usuario_sucursal (usuario_bd, id_sucursal) VALUES
 ('inventory_user@localhost', 1)
 ON DUPLICATE KEY UPDATE id_sucursal = VALUES(id_sucursal);
 
-CREATE OR REPLACE VIEW v_ventas_sucursal_usuario AS
+-- IMPORTANTE: la vista DEBE declararse con SQL SECURITY INVOKER.
+-- Una vista en contexto DEFINER (el valor por defecto) evalua CURRENT_USER()
+-- como el usuario DEFINIDOR (root), no como el usuario conectado; el filtro por
+-- sucursal quedaria inoperante y todos verian todas las filas.
+CREATE OR REPLACE
+    SQL SECURITY INVOKER
+    VIEW v_ventas_sucursal_usuario AS
 SELECT v.*
 FROM ventas v
 JOIN asignacion_usuario_sucursal aus ON v.id_sucursal = aus.id_sucursal
@@ -185,10 +224,25 @@ WHERE aus.usuario_bd = CURRENT_USER()
 GRANT SELECT ON ecommerce_db.v_ventas_sucursal_usuario TO 'Atencion_Cliente';
 GRANT SELECT ON ecommerce_db.v_ventas_sucursal_usuario TO 'Gerente_Marketing';
 
+-- Con SQL SECURITY INVOKER el usuario necesita permiso sobre las tablas base.
+GRANT SELECT ON ecommerce_db.asignacion_usuario_sucursal TO 'Atencion_Cliente';
+GRANT SELECT ON ecommerce_db.asignacion_usuario_sucursal TO 'Gerente_Marketing';
+
 -- -----------------------------------------------------------------------------
 -- 20. Auditar intentos de inicio de sesión fallidos en la base de datos.
+--
+--     'log_warnings' fue ELIMINADA en MySQL 8.0; su sustituta es
+--     'log_error_verbosity' (1=errores, 2=+advertencias, 3=+notas).
+--     Con verbosity >= 2 el error log registra cada intento de conexión fallido.
+--
+--     LIMITACION CONOCIDA: MySQL no permite triggers sobre eventos de conexión,
+--     por lo que la tabla siguiente NO puede poblarse desde SQL puro. Se alimenta
+--     desde fuera de la BD (parseo del error log) o con el componente de auditoría:
+--         INSTALL COMPONENT 'file://component_audit_api_message_emit';
+--     Además, MySQL ya expone el contador nativo por cuenta en:
+--         SELECT USER, HOST, FAILED_ATTEMPTS FROM performance_schema.host_cache;
 -- -----------------------------------------------------------------------------
-SET GLOBAL log_warnings = 2;
+SET GLOBAL log_error_verbosity = 2;
 
 CREATE TABLE IF NOT EXISTS auditoria_accesos_fallidos (
     id_auditoria INT AUTO_INCREMENT PRIMARY KEY,

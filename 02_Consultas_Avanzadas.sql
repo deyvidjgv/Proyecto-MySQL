@@ -130,19 +130,30 @@ LIMIT 10;
 -- 8. Rotación de Inventario
 -- Tasa de rotación de stock por categoría de producto.
 -- -----------------------------------------------------------------------------
+-- NOTA: el stock y las unidades vendidas se agregan en subconsultas SEPARADAS.
+-- Unir productos y detalle_ventas en un solo GROUP BY duplicaría cada fila de
+-- producto una vez por línea de venta e inflaría SUM(p.stock) (fan-out del JOIN).
 SELECT 
     c.id_categoria,
     c.nombre AS categoria,
-    COALESCE(SUM(p.stock), 0) AS stock_actual_total,
-    COALESCE(SUM(dv.cantidad), 0) AS unidades_vendidas,
+    COALESCE(inv.stock_actual_total, 0) AS stock_actual_total,
+    COALESCE(ven.unidades_vendidas, 0) AS unidades_vendidas,
     ROUND(
-        COALESCE(SUM(dv.cantidad), 0) / NULLIF(SUM(p.stock), 0), 
+        COALESCE(ven.unidades_vendidas, 0) / NULLIF(inv.stock_actual_total, 0), 
         2
     ) AS indice_rotacion
 FROM categorias c
-JOIN productos p ON c.id_categoria = p.id_categoria
-LEFT JOIN detalle_ventas dv ON p.id_producto = dv.id_producto
-GROUP BY c.id_categoria, c.nombre
+LEFT JOIN (
+    SELECT id_categoria, SUM(stock) AS stock_actual_total
+    FROM productos
+    GROUP BY id_categoria
+) inv ON c.id_categoria = inv.id_categoria
+LEFT JOIN (
+    SELECT p.id_categoria, SUM(dv.cantidad) AS unidades_vendidas
+    FROM detalle_ventas dv
+    JOIN productos p ON dv.id_producto = p.id_producto
+    GROUP BY p.id_categoria
+) ven ON c.id_categoria = ven.id_categoria
 ORDER BY indice_rotacion DESC;
 
 -- -----------------------------------------------------------------------------
@@ -328,19 +339,29 @@ ORDER BY dias_promedio_entre_compras ASC;
 -- 18. Productos Más Vistos vs. Comprados
 -- Comparativa de vistas de producto contra compras efectivas y tasa de conversión.
 -- -----------------------------------------------------------------------------
+-- NOTA: visitas y compras son dos ramas de detalle independientes. Unirlas con
+-- dos LEFT JOIN en el mismo GROUP BY genera producto cartesiano y multiplica las
+-- unidades compradas por el número de visitas. Cada métrica se agrega por separado.
 SELECT 
     p.id_producto,
     p.nombre AS producto,
-    COUNT(DISTINCT vp.id_visita) AS total_visitas,
-    COALESCE(SUM(dv.cantidad), 0) AS total_unidades_compradas,
+    COALESCE(vis.total_visitas, 0) AS total_visitas,
+    COALESCE(com.total_unidades_compradas, 0) AS total_unidades_compradas,
     ROUND(
-        (COALESCE(SUM(dv.cantidad), 0) * 100.0) / NULLIF(COUNT(DISTINCT vp.id_visita), 0), 
+        (COALESCE(com.total_unidades_compradas, 0) * 100.0) / NULLIF(vis.total_visitas, 0), 
         2
     ) AS tasa_conversion_porcentaje
 FROM productos p
-LEFT JOIN visitas_productos vp ON p.id_producto = vp.id_producto
-LEFT JOIN detalle_ventas dv ON p.id_producto = dv.id_producto
-GROUP BY p.id_producto, p.nombre
+LEFT JOIN (
+    SELECT id_producto, COUNT(*) AS total_visitas
+    FROM visitas_productos
+    GROUP BY id_producto
+) vis ON p.id_producto = vis.id_producto
+LEFT JOIN (
+    SELECT id_producto, SUM(cantidad) AS total_unidades_compradas
+    FROM detalle_ventas
+    GROUP BY id_producto
+) com ON p.id_producto = com.id_producto
 ORDER BY total_visitas DESC, total_unidades_compradas DESC;
 
 -- -----------------------------------------------------------------------------

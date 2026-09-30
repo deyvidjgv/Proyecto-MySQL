@@ -374,8 +374,16 @@ BEGIN
         RETURN FALSE;
     END IF;
     
-    -- Valida que contenga al menos una mayúscula y al menos un dígito
-    RETURN (p_password REGEXP '[A-Z]' AND p_password REGEXP '[0-9]');
+    -- Valida mayúscula, minúscula, dígito y carácter especial.
+    -- CRITICO: la BD usa utf8mb4_unicode_ci, una collation INSENSIBLE a mayúsculas;
+    -- sin forzar 'COLLATE utf8mb4_bin' el patrón '[A-Z]' también casaría con
+    -- minúsculas y 'abcdefg1' pasaría la validación.
+    RETURN (
+           (p_password COLLATE utf8mb4_bin) REGEXP '[A-Z]'
+       AND (p_password COLLATE utf8mb4_bin) REGEXP '[a-z]'
+       AND (p_password COLLATE utf8mb4_bin) REGEXP '[0-9]'
+       AND (p_password COLLATE utf8mb4_bin) REGEXP '[^A-Za-z0-9]'
+    );
 END //
 
 DELIMITER ;

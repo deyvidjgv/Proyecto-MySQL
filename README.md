@@ -1,7 +1,7 @@
 # Proyecto de Base de Datos para un E-commerce
 
 ## 1. Descripción Breve
-Este proyecto implementa el núcleo robusto, seguro y escalable de una base de datos relacional para una plataforma de **E-commerce** en **MySQL / MariaDB**. Contempla el ciclo completo de diseño y optimización: normalización relacional, integridad referencial con claves foráneas y restricciones `CHECK`, reportería analítica avanzada (20 consultas de negocio), encapsulación de lógica mediante funciones definidas por el usuario (20 UDFs), políticas granulares de seguridad basadas en roles y vistas (20 requisitos), disparadores de automatización y auditoría (20 triggers), tareas programadas en segundo plano (20 eventos) y procedimientos almacenados transaccionales (20 SPs con soporte `START TRANSACTION`, `COMMIT` y `ROLLBACK`).
+Este proyecto implementa el núcleo robusto, seguro y escalable de una base de datos relacional para una plataforma de **E-commerce** en **MySQL 8.0.19 o superior**. Contempla el ciclo completo de diseño y optimización: normalización relacional, integridad referencial con claves foráneas y restricciones `CHECK`, reportería analítica avanzada (20 consultas de negocio), encapsulación de lógica mediante funciones definidas por el usuario (20 UDFs), políticas granulares de seguridad basadas en roles y vistas (20 requisitos), disparadores de automatización y auditoría (20 triggers), tareas programadas en segundo plano (20 eventos) y procedimientos almacenados transaccionales (20 SPs con soporte `START TRANSACTION`, `COMMIT` y `ROLLBACK`).
 
 ---
 
@@ -30,6 +30,19 @@ erDiagram
 
 ---
 
+## 3.1 Requisitos del Servidor
+
+| Requisito | Motivo |
+|---|---|
+| **MySQL 8.0.19+** | Roles (`CREATE ROLE`), CTEs (`WITH`), funciones de ventana (`NTILE`, `ROW_NUMBER`, `LAG`), restricciones `CHECK` aplicadas (8.0.16+), `REVOKE IF EXISTS` (8.0.16+) y `FAILED_LOGIN_ATTEMPTS` (8.0.19+) |
+| **Motor InnoDB** | Claves foráneas y transacciones ACID en los procedimientos |
+| **Charset `utf8mb4`** | Identificadores y datos con `ñ` y tildes |
+| **Privilegios `SUPER` / `SYSTEM_VARIABLES_ADMIN`** | `SET GLOBAL event_scheduler`, `log_error_verbosity` y `validate_password.*` en `04` y `06` |
+
+> El proyecto **no** es compatible con MariaDB sin modificaciones: `log_error_verbosity`, el componente `validate_password` y la sintaxis de roles con host difieren.
+
+---
+
 ## 4. Instrucciones de Ejecución
 
 Para garantizar la integridad referencial y la correcta instanciación de todos los objetos, los scripts SQL deben ejecutarse de manera secuencial estricta desde la raíz del proyecto:
@@ -40,7 +53,7 @@ Para garantizar la integridad referencial y la correcta instanciación de todos 
 | **2°** | [`02_Consultas_Avanzadas.sql`](02_Consultas_Avanzadas.sql) | Ejecuta las 20 consultas de análisis de negocio (Top 10, LTV, RFM, Cohortes, Rotación, etc.). | [Ver Evidencia](evidencias/02_consultas_avanzadas.md) |
 | **3°** | [`03_Funciones.sql`](03_Funciones.sql) | Registra las 20 funciones de usuario (UDF) para cálculos de IVA, edad, stock, formatos y validaciones. | [Ver Evidencia](evidencias/03_funciones.md) |
 | **4°** | [`04_Seguridad.sql`](04_Seguridad.sql) | Configura roles, usuarios, privilegios granulares (`GRANT`/`REVOKE`), vistas de seguridad y políticas de contraseñas. | [Ver Evidencia](evidencias/04_seguridad.md) |
-| **5°** | [`05_Triggers.sql`](05_Triggers.sql) | Crea la tabla `log_cambios_precio` y los 20 disparadores de auditoría y validación automática. | [Ver Evidencia](evidencias/05_triggers.md) |
+| **5°** | [`05_Triggers.sql`](05_Triggers.sql) | Crea la tabla `log_cambios_precio`, los 20 disparadores exigidos y 10 complementarios (C1–C10). | [Ver Evidencia](evidencias/05_triggers.md) |
 | **6°** | [`06_Eventos.sql`](06_Eventos.sql) | Activa el `event_scheduler`, crea la tabla `reporte_ventas_semanales` y programa los 20 eventos recurrentes. | [Ver Evidencia](evidencias/06_eventos.md) |
 | **7°** | [`07_Procedimientos_Almacenados.sql`](07_Procedimientos_Almacenados.sql) | Compila los 20 procedimientos almacenados transaccionales con control de excepciones y consistencia ACID. | [Ver Evidencia](evidencias/07_procedimientos.md) |
 
@@ -93,7 +106,9 @@ mysql -u root -p < 07_Procedimientos_Almacenados.sql
 - **Usuarios de prueba:** `admin_user`, `marketing_user`, `inventory_user`, `support_user`, `analyst_user`.
 - **Privilegios granulares:** Restricción estricta de `DELETE`/`DROP` a analistas, revocación de actualización de precios a inventario, expiración de claves a 90 días, restricción de acceso remoto para `root`, límites de carga horaria (`MAX_QUERIES_PER_HOUR 500`), vista segura `v_info_clientes_basica` y aislamiento de ventas por sucursal `v_ventas_sucursal_usuario`.
 
-### Disparadores / Triggers (20 triggers)
+### Disparadores / Triggers (20 exigidos + 10 complementarios)
+> Un trigger de MySQL atiende **un solo** evento (INSERT, UPDATE o DELETE). Los requisitos redactados como *"al insertar **o** actualizar"* necesitan por tanto una pareja de disparadores. Los 10 triggers `C1`–`C10` al final de `05_Triggers.sql` cierran esa cobertura (cálculo de `subtotal`, recálculo del total al insertar/borrar líneas, validación de email en INSERT, precio en UPDATE, y contador de productos por categoría en DELETE/cambio de categoría).
+
 - Auditoría histórica en `log_cambios_precio`, verificación y reserva automática de stock, protección contra eliminación de categorías activas, registro de nuevos clientes en log, cálculo automático de gasto acumulado y lealtad, marcas temporales de modificación, validación de stock negativo y precios menores a cero, estandarización de mayúsculas en nombres, recálculo dinámico de totales de venta, historial de estados de pedidos, alertas de stock mínimo, archivo de ventas eliminadas, validación regex de correos, prevención de autoreferidos, auditoría de sucursales asignadas y contadores de inventario por categoría.
 
 ### Eventos Programados (20 eventos)

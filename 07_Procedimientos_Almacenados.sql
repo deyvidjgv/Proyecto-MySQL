@@ -127,6 +127,8 @@ CREATE PROCEDURE sp_ProcesarDevolucion(
 BEGIN
     DECLARE v_precio_congelado DECIMAL(10,2);
     DECLARE v_monto_credito DECIMAL(10,2);
+    DECLARE v_cantidad_vendida INT DEFAULT 0;
+    DECLARE v_ya_devuelto INT DEFAULT 0;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -135,7 +137,13 @@ BEGIN
 
     START TRANSACTION;
 
-    SELECT precio_unitario_congelado INTO v_precio_congelado
+    IF p_cantidad IS NULL OR p_cantidad <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: La cantidad a devolver debe ser mayor a cero.';
+    END IF;
+
+    SELECT precio_unitario_congelado, cantidad
+    INTO v_precio_congelado, v_cantidad_vendida
     FROM detalle_ventas
     WHERE id_venta = p_id_venta AND id_producto = p_id_producto
     LIMIT 1;
@@ -143,6 +151,16 @@ BEGIN
     IF v_precio_congelado IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Error: No se encontró la venta o producto especificado para devolución.';
+    END IF;
+
+    -- Suma de lo ya devuelto de esa linea, para no devolver mas de lo comprado.
+    SELECT COALESCE(SUM(cantidad), 0) INTO v_ya_devuelto
+    FROM devoluciones
+    WHERE id_venta = p_id_venta AND id_producto = p_id_producto;
+
+    IF (v_ya_devuelto + p_cantidad) > v_cantidad_vendida THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: La cantidad devuelta supera las unidades compradas en esa venta.';
     END IF;
 
     SET v_monto_credito = ROUND(v_precio_congelado * p_cantidad, 2);
@@ -295,9 +313,20 @@ CREATE PROCEDURE sp_CambiarEstadoPedido(
     IN p_nuevo_estado VARCHAR(50)
 )
 BEGIN
+    DECLARE v_existe INT DEFAULT 0;
+
     IF p_nuevo_estado NOT IN ('Pendiente de Pago', 'Procesando', 'Enviado', 'Entregado', 'Cancelado') THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Error: Estado de orden de venta no válido.';
+    END IF;
+
+    -- Sin esta comprobacion un id inexistente no daba error: el UPDATE
+    -- simplemente afectaba 0 filas y el llamador creia que habia funcionado.
+    SELECT COUNT(*) INTO v_existe FROM ventas WHERE id_venta = p_id_venta;
+
+    IF v_existe = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: La orden de venta indicada no existe.';
     END IF;
 
     UPDATE ventas
@@ -471,6 +500,7 @@ BEGIN
     SELECT 
         (SELECT COUNT(*) FROM ventas WHERE DATE(fecha_venta) = CURDATE()) AS ventas_hoy,
         (SELECT COALESCE(SUM(total), 0.00) FROM ventas WHERE DATE(fecha_venta) = CURDATE()) AS ingresos_hoy,
+        (SELECT COUNT(*) FROM clientes WHERE DATE(fecha_registro) = CURDATE()) AS clientes_nuevos_hoy,
         (SELECT COUNT(*) FROM clientes WHERE activo = TRUE) AS clientes_activos,
         (SELECT COUNT(*) FROM productos WHERE stock <= stock_minimo AND activo = TRUE) AS productos_alerta_stock,
         (SELECT COUNT(*) FROM ventas WHERE estado = 'Pendiente de Pago') AS ordenes_pendientes;
@@ -580,7 +610,7 @@ CREATE PROCEDURE sp_MoverProductosEntreCategorias(
     IN p_id_categoria_destino INT
 )
 BEGIN
-    DECLARE v_movidos INT DEFAULT 0;
+    DECLARE v_existe_destino INT DEFAULT 0;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -589,21 +619,23 @@ BEGIN
 
     START TRANSACTION;
 
-    SELECT COUNT(*) INTO v_movidos
-    FROM productos
-    WHERE id_categoria = p_id_categoria_origen;
+    SELECT COUNT(*) INTO v_existe_destino
+    FROM categorias
+    WHERE id_categoria = p_id_categoria_destino;
+
+    IF v_existe_destino = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: La categoria de destino no existe.';
+    END IF;
 
     UPDATE productos
     SET id_categoria = p_id_categoria_destino
     WHERE id_categoria = p_id_categoria_origen;
 
-    UPDATE categorias
-    SET total_productos = total_productos - v_movidos
-    WHERE id_categoria = p_id_categoria_origen;
-
-    UPDATE categorias
-    SET total_productos = total_productos + v_movidos
-    WHERE id_categoria = p_id_categoria_destino;
+    -- NO se ajusta 'categorias.total_productos' aqui: el trigger
+    -- trg_move_producto_count_on_update (05_Triggers.sql) ya traslada el conteo
+    -- de la categoria origen a la destino en cada fila actualizada. Hacerlo
+    -- tambien desde el procedimiento contaria los movimientos DOS VECES.
 
     COMMIT;
 END //

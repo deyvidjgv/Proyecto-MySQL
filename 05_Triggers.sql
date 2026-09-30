@@ -115,9 +115,19 @@ CREATE TRIGGER trg_update_total_gastado_cliente
 AFTER UPDATE ON ventas
 FOR EACH ROW
 BEGIN
-    IF NEW.estado = 'Entregado' AND OLD.estado <> 'Entregado' THEN
+    -- Se RECALCULA el acumulado en vez de sumarlo incrementalmente.
+    -- Un acumulador ('total_gastado = total_gastado + NEW.total') se descuadra
+    -- si un pedido cambia de estado varias veces (Entregado -> Enviado ->
+    -- Entregado sumaria dos veces) o si se corrige el total de la venta.
+    -- El criterio es el mismo que usan los datos sembrados en 01 y la consulta 3:
+    -- toda venta cuyo estado no sea 'Cancelado'.
+    IF OLD.estado <> NEW.estado OR OLD.total <> NEW.total THEN
         UPDATE clientes
-        SET total_gastado = total_gastado + NEW.total
+        SET total_gastado = (
+            SELECT COALESCE(SUM(total), 0.00)
+            FROM ventas
+            WHERE id_cliente = NEW.id_cliente AND estado <> 'Cancelado'
+        )
         WHERE id_cliente = NEW.id_cliente;
     END IF;
 END //
@@ -219,7 +229,10 @@ CREATE TRIGGER trg_send_stock_alert_on_low_stock
 AFTER UPDATE ON productos
 FOR EACH ROW
 BEGIN
-    IF NEW.stock <= NEW.stock_minimo AND (OLD.stock > OLD.stock_minimo OR OLD.stock <> NEW.stock) THEN
+    -- Solo en la TRANSICION a nivel critico. La condicion anterior incluia
+    -- 'OR OLD.stock <> NEW.stock', que generaba una alerta en CADA movimiento
+    -- mientras el producto siguiera bajo minimos (spam de alertas).
+    IF NEW.stock <= NEW.stock_minimo AND OLD.stock > OLD.stock_minimo THEN
         INSERT INTO alertas_stock (id_producto, stock_actual, mensaje, fecha)
         VALUES (
             NEW.id_producto, 
@@ -329,6 +342,171 @@ BEGIN
         SET total_productos = total_productos + 1
         WHERE id_categoria = NEW.id_categoria;
     END IF;
+END //
+
+-- =============================================================================
+-- TRIGGERS COMPLEMENTARIOS
+-- Los 20 disparadores exigidos por el enunciado estan arriba. Un trigger de
+-- MySQL solo puede atender UN evento (INSERT, UPDATE o DELETE), por lo que los
+-- requisitos redactados como "al insertar O actualizar" necesitan una pareja.
+-- Estos complementan a sus homonimos, no los sustituyen.
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- C1. trg_set_subtotal_before_insert_detalle
+-- Calcula el subtotal de la linea. Sin esto la columna queda en su DEFAULT 0.00
+-- cuando el INSERT no la pasa explicitamente, y el total de la venta descuadra.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_set_subtotal_before_insert_detalle //
+CREATE TRIGGER trg_set_subtotal_before_insert_detalle
+BEFORE INSERT ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    SET NEW.subtotal = ROUND(NEW.cantidad * NEW.precio_unitario_congelado, 2);
+END //
+
+-- -----------------------------------------------------------------------------
+-- C2. trg_set_subtotal_before_update_detalle
+-- Mantiene el subtotal coherente si se corrige la cantidad o el precio congelado.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_set_subtotal_before_update_detalle //
+CREATE TRIGGER trg_set_subtotal_before_update_detalle
+BEFORE UPDATE ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    SET NEW.subtotal = ROUND(NEW.cantidad * NEW.precio_unitario_congelado, 2);
+END //
+
+-- -----------------------------------------------------------------------------
+-- C3. trg_recalculate_total_venta_on_detalle_insert
+-- Complementa a trg_recalculate_total_venta_on_detalle_change, que solo cubria
+-- el UPDATE: el total tambien debe recalcularse al agregar una linea.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_recalculate_total_venta_on_detalle_insert //
+CREATE TRIGGER trg_recalculate_total_venta_on_detalle_insert
+AFTER INSERT ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    UPDATE ventas
+    SET total = (SELECT COALESCE(SUM(subtotal), 0.00) FROM detalle_ventas WHERE id_venta = NEW.id_venta)
+    WHERE id_venta = NEW.id_venta;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C4. trg_recalculate_total_venta_on_detalle_delete
+-- Recalcula el total al eliminar una linea de la orden.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_recalculate_total_venta_on_detalle_delete //
+CREATE TRIGGER trg_recalculate_total_venta_on_detalle_delete
+AFTER DELETE ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    UPDATE ventas
+    SET total = (SELECT COALESCE(SUM(subtotal), 0.00) FROM detalle_ventas WHERE id_venta = OLD.id_venta)
+    WHERE id_venta = OLD.id_venta;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C5. trg_validate_email_format_on_customer_insert
+-- El enunciado pide validar el email "antes de insertar O actualizar"; el
+-- trigger 15 solo cubria el UPDATE, asi que un INSERT con email invalido pasaba.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_validate_email_format_on_customer_insert //
+CREATE TRIGGER trg_validate_email_format_on_customer_insert
+BEFORE INSERT ON clientes
+FOR EACH ROW
+BEGIN
+    IF NEW.email NOT REGEXP '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: El formato del correo electronico proporcionado no es valido.';
+    END IF;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C6. trg_prevent_price_zero_or_less_on_update
+-- El trigger 12 solo cubria el INSERT: un UPDATE a precio 0 lo esquivaba.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_prevent_price_zero_or_less_on_update //
+CREATE TRIGGER trg_prevent_price_zero_or_less_on_update
+BEFORE UPDATE ON productos
+FOR EACH ROW
+BEGIN
+    IF NEW.precio <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: El precio del producto debe ser estrictamente mayor a 0.';
+    END IF;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C7. trg_prevent_self_referral_on_insert
+-- Bloquea la autoreferencia cuando el id_cliente se indica explicitamente.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_prevent_self_referral_on_insert //
+CREATE TRIGGER trg_prevent_self_referral_on_insert
+BEFORE INSERT ON clientes
+FOR EACH ROW
+BEGIN
+    IF NEW.id_referido_por IS NOT NULL AND NEW.id_cliente IS NOT NULL
+       AND NEW.id_referido_por = NEW.id_cliente THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Error: Un cliente no puede ser su propio referido.';
+    END IF;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C8. trg_decrement_producto_count_on_delete
+-- El trigger 20 solo sumaba en el INSERT; sin esto el contador
+-- categorias.total_productos se desincroniza en cuanto se borra un producto.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_decrement_producto_count_on_delete //
+CREATE TRIGGER trg_decrement_producto_count_on_delete
+AFTER DELETE ON productos
+FOR EACH ROW
+BEGIN
+    IF OLD.id_categoria IS NOT NULL THEN
+        UPDATE categorias
+        SET total_productos = GREATEST(total_productos - 1, 0)
+        WHERE id_categoria = OLD.id_categoria;
+    END IF;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C9. trg_move_producto_count_on_update
+-- Traslada el conteo cuando un producto cambia de categoria.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_move_producto_count_on_update //
+CREATE TRIGGER trg_move_producto_count_on_update
+AFTER UPDATE ON productos
+FOR EACH ROW
+BEGIN
+    IF NOT (OLD.id_categoria <=> NEW.id_categoria) THEN
+        IF OLD.id_categoria IS NOT NULL THEN
+            UPDATE categorias SET total_productos = GREATEST(total_productos - 1, 0)
+            WHERE id_categoria = OLD.id_categoria;
+        END IF;
+        IF NEW.id_categoria IS NOT NULL THEN
+            UPDATE categorias SET total_productos = total_productos + 1
+            WHERE id_categoria = NEW.id_categoria;
+        END IF;
+    END IF;
+END //
+
+-- -----------------------------------------------------------------------------
+-- C10. trg_update_total_gastado_on_venta_insert
+-- Mantiene coherente el acumulado del cliente al registrarse una venta nueva.
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_update_total_gastado_on_venta_insert //
+CREATE TRIGGER trg_update_total_gastado_on_venta_insert
+AFTER INSERT ON ventas
+FOR EACH ROW
+BEGIN
+    UPDATE clientes
+    SET total_gastado = (
+        SELECT COALESCE(SUM(total), 0.00)
+        FROM ventas
+        WHERE id_cliente = NEW.id_cliente AND estado <> 'Cancelado'
+    )
+    WHERE id_cliente = NEW.id_cliente;
 END //
 
 DELIMITER ;
