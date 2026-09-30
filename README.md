@@ -39,7 +39,9 @@ erDiagram
 | **Charset `utf8mb4`** | Identificadores y datos con `ñ` y tildes |
 | **Privilegios `SUPER` / `SYSTEM_VARIABLES_ADMIN`** | `SET GLOBAL event_scheduler`, `log_error_verbosity` y `validate_password.*` en `04` y `06` |
 
-> El proyecto **no** es compatible con MariaDB sin modificaciones: `log_error_verbosity`, el componente `validate_password` y la sintaxis de roles con host difieren.
+> El proyecto **no** es compatible con MariaDB sin modificaciones: `log_error_verbosity`, el componente `validate_password` y la sintaxis `SET DEFAULT ROLE ... TO` (MariaDB usa `FOR`) difieren.
+
+> **Verificado:** los 7 scripts se ejecutaron de principio a fin, en orden y sobre una base limpia, en **MySQL Community Server 26.7.0**, sin errores. Objetos creados: 32 tablas, 2 vistas, 20 funciones, 20 procedimientos, 30 triggers, 20 eventos, 7 roles y 5 usuarios.
 
 ---
 

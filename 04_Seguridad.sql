@@ -67,28 +67,28 @@ GRANT SELECT ON ecommerce_db.historial_pedidos_estado TO 'Auditor_Financiero';
 -- -----------------------------------------------------------------------------
 CREATE USER IF NOT EXISTS 'admin_user'@'localhost' IDENTIFIED BY 'Admin2026!SecureKey';
 GRANT 'Administrador_Sistema' TO 'admin_user'@'localhost';
-SET DEFAULT ROLE 'Administrador_Sistema' FOR 'admin_user'@'localhost';
+SET DEFAULT ROLE 'Administrador_Sistema' TO 'admin_user'@'localhost';
 
 -- -----------------------------------------------------------------------------
 -- 8. Crear usuario marketing_user y asignarle el rol de marketing.
 -- -----------------------------------------------------------------------------
 CREATE USER IF NOT EXISTS 'marketing_user'@'localhost' IDENTIFIED BY 'Market2026!PromoPass';
 GRANT 'Gerente_Marketing' TO 'marketing_user'@'localhost';
-SET DEFAULT ROLE 'Gerente_Marketing' FOR 'marketing_user'@'localhost';
+SET DEFAULT ROLE 'Gerente_Marketing' TO 'marketing_user'@'localhost';
 
 -- -----------------------------------------------------------------------------
 -- 9. Crear usuario inventory_user y asignarle el rol de inventario.
 -- -----------------------------------------------------------------------------
 CREATE USER IF NOT EXISTS 'inventory_user'@'localhost' IDENTIFIED BY 'Inven2026!StockKey';
 GRANT 'Empleado_Inventario' TO 'inventory_user'@'localhost';
-SET DEFAULT ROLE 'Empleado_Inventario' FOR 'inventory_user'@'localhost';
+SET DEFAULT ROLE 'Empleado_Inventario' TO 'inventory_user'@'localhost';
 
 -- -----------------------------------------------------------------------------
 -- 10. Crear usuario support_user y asignarle el rol de atención al cliente.
 -- -----------------------------------------------------------------------------
 CREATE USER IF NOT EXISTS 'support_user'@'localhost' IDENTIFIED BY 'Supp2026!ClientPass';
 GRANT 'Atencion_Cliente' TO 'support_user'@'localhost';
-SET DEFAULT ROLE 'Atencion_Cliente' FOR 'support_user'@'localhost';
+SET DEFAULT ROLE 'Atencion_Cliente' TO 'support_user'@'localhost';
 
 -- -----------------------------------------------------------------------------
 -- 11. Impedir que el rol Analista_Datos pueda ejecutar comandos DELETE o TRUNCATE.
@@ -135,18 +135,24 @@ REVOKE UPDATE (precio) ON ecommerce_db.productos FROM 'Empleado_Inventario';
 --     La expiración por sí sola NO es una política: hay que activar el componente
 --     validate_password, que es quien impone longitud y composición mínimas.
 -- -----------------------------------------------------------------------------
--- Activación IDEMPOTENTE del validador: 'INSTALL COMPONENT' a secas falla con
--- ERROR 3529 si el componente ya está instalado y abortaría el script completo.
-SET @vp_instalado := (
-    SELECT COUNT(*) FROM mysql.component
-    WHERE component_urn = 'file://component_validate_password'
-);
-SET @sql_vp := IF(@vp_instalado = 0,
-                  "INSTALL COMPONENT 'file://component_validate_password'",
-                  "DO 0");
-PREPARE stmt_vp FROM @sql_vp;
-EXECUTE stmt_vp;
-DEALLOCATE PREPARE stmt_vp;
+-- Activación IDEMPOTENTE del validador.
+--   * 'INSTALL COMPONENT' a secas falla con ERROR 3529 si el componente ya
+--     está instalado, y el error abortaría el resto del script.
+--   * Tampoco admite 'IF NOT EXISTS' ni el protocolo de sentencias preparadas
+--     (ERROR 1295), asi que no sirve envolverlo en PREPARE/EXECUTE.
+-- La via que si funciona: un procedimiento con CONTINUE HANDLER que absorbe el
+-- error de "ya instalado" y permite volver a ejecutar el script sin romperlo.
+DROP PROCEDURE IF EXISTS sp_activar_validate_password;
+DELIMITER //
+CREATE PROCEDURE sp_activar_validate_password()
+BEGIN
+    DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN END;
+    INSTALL COMPONENT 'file://component_validate_password';
+END //
+DELIMITER ;
+
+CALL sp_activar_validate_password();
+DROP PROCEDURE IF EXISTS sp_activar_validate_password;
 
 SET GLOBAL validate_password.policy           = STRONG;  -- longitud + mayús/minús + dígito + especial + diccionario
 SET GLOBAL validate_password.length           = 12;
@@ -189,7 +195,7 @@ IDENTIFIED BY 'Analyst2026!QueryLimit'
 WITH MAX_QUERIES_PER_HOUR 500;
 
 GRANT 'Analista_Datos' TO 'analyst_user'@'localhost';
-SET DEFAULT ROLE 'Analista_Datos' FOR 'analyst_user'@'localhost';
+SET DEFAULT ROLE 'Analista_Datos' TO 'analyst_user'@'localhost';
 
 -- -----------------------------------------------------------------------------
 -- 19. Asegurar que los usuarios solo vean ventas de su sucursal correspondiente.

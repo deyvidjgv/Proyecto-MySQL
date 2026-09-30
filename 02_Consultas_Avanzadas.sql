@@ -87,7 +87,10 @@ SELECT
     CONCAT(YEAR(fecha_registro), '-Q', QUARTER(fecha_registro)) AS periodo_trimestre,
     COUNT(id_cliente) AS nuevos_clientes
 FROM clientes
-GROUP BY YEAR(fecha_registro), QUARTER(fecha_registro)
+-- 'periodo_trimestre' debe figurar tambien en el GROUP BY: con only_full_group_by
+-- (activo por defecto en MySQL 8) el servidor no deduce que una expresion CONCAT
+-- dependa funcionalmente de las columnas agrupadas.
+GROUP BY anio, trimestre, periodo_trimestre
 ORDER BY anio, trimestre;
 
 -- -----------------------------------------------------------------------------
