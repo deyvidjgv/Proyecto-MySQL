@@ -41,7 +41,7 @@ erDiagram
 
 > El proyecto **no** es compatible con MariaDB sin modificaciones: `log_error_verbosity`, el componente `validate_password` y la sintaxis `SET DEFAULT ROLE ... TO` (MariaDB usa `FOR`) difieren.
 
-> **Verificado:** los 7 scripts se ejecutaron de principio a fin, en orden y sobre una base limpia, en **MySQL Community Server 26.7.0**, sin errores. Objetos creados: 32 tablas, 2 vistas, 20 funciones, 20 procedimientos, 30 triggers, 20 eventos, 7 roles y 5 usuarios. Los scripts 01 al 08 se ejecutaron también en **MySQL 8.0.46** sin errores.
+> **Verificado:** los 7 scripts se ejecutaron de principio a fin, en orden y sobre una base limpia, en **MySQL Community Server 26.7.0**, sin errores. Objetos creados: 32 tablas, 2 vistas, 20 funciones, 20 procedimientos, 30 triggers, 20 eventos, 7 roles y 5 usuarios.
 
 ---
 
@@ -58,7 +58,7 @@ Para garantizar la integridad referencial y la correcta instanciación de todos 
 | **5°** | [`05_Triggers.sql`](05_Triggers.sql) | Crea la tabla `log_cambios_precio`, los 20 disparadores exigidos y 10 complementarios (C1–C10). | [Ver Evidencia](evidencias/05_triggers.md) |
 | **6°** | [`06_Eventos.sql`](06_Eventos.sql) | Activa el `event_scheduler`, crea la tabla `reporte_ventas_semanales` y programa los 20 eventos recurrentes. | [Ver Evidencia](evidencias/06_eventos.md) |
 | **7°** | [`07_Procedimientos_Almacenados.sql`](07_Procedimientos_Almacenados.sql) | Compila los 20 procedimientos almacenados transaccionales con control de excepciones y consistencia ACID. | [Ver Evidencia](evidencias/07_procedimientos.md) |
-| **8°** | [`08_Examen_sp_ProcesarDevolucion.sql`](08_Examen_sp_ProcesarDevolucion.sql) | **Examen:** crea la tabla `devoluciones` y el procedimiento `sp_ProcesarDevolucion` (proceso de devolución completo). Ver [sección 7](#7-examen-procedimiento-almacenado---proceso-de-devolución-completo). | [Ver Evidencia](evidencias/08_examen_devoluciones.md) |
+| **8°** | [`08_Examen_sp_ProcesarDevolucion.sql`](08_Examen_sp_ProcesarDevolucion.sql) | **Examen:** crea la tabla `devoluciones` y el procedimiento `sp_ProcesarDevolucion` (proceso de devolución completo). | — |
 
 ### Ejecución por Consola de Comandos (CLI)
 Desde el directorio del repositorio en una terminal de comandos (PowerShell / Bash / CMD):
@@ -133,22 +133,3 @@ Todos los scripts han sido compilados y ejecutados exitosamente en un servidor l
 - [Evidencia 05 - Validación de Triggers y Auditoría en Vivo](evidencias/05_triggers.md)
 - [Evidencia 06 - Verificación del Event Scheduler y los 20 Eventos](evidencias/06_eventos.md)
 - [Evidencia 07 - Ejecución de Procedimientos y Pruebas del Dashboard](evidencias/07_procedimientos.md)
-- [Evidencia 08 - Examen: Pruebas de sp_ProcesarDevolucion](evidencias/08_examen_devoluciones.md)
-
----
-
-## 7. Examen: Procedimiento Almacenado - Proceso de Devolución Completo
-
-El script [`08_Examen_sp_ProcesarDevolucion.sql`](08_Examen_sp_ProcesarDevolucion.sql) contiene en un único archivo el `CREATE TABLE` de `devoluciones` y el `CREATE PROCEDURE` de `sp_ProcesarDevolucion(id_venta, id_producto, cantidad_devuelta)`, con comentarios que explican la lógica. Requiere la base `ecommerce_db` creada con los scripts 01 al 07, y reemplaza la tabla `devoluciones` de `01` y el `sp_ProcesarDevolucion` de 4 parámetros de `07`.
-
-| Requisito | Cómo se cumple |
-|---|---|
-| 1. No devolver más de lo comprado | Compara la cantidad pedida con lo comprado en esa venta **menos lo ya devuelto** antes, y lanza `SIGNAL SQLSTATE '45000'` si se supera |
-| 2. Incrementar el stock | `UPDATE productos SET stock = stock + cantidad_devuelta` |
-| 3. Estado `'Devolución Parcial'` / `'Devuelto Totalmente'` | Amplía el `ENUM` de `ventas.estado` con los dos valores nuevos y compara las unidades devueltas con las unidades de **toda** la venta |
-| 4. Tabla `devoluciones` con los detalles | Guarda venta, producto, cantidad, precio, reembolso, estado resultante, usuario y fecha |
-| 5. Transacción atómica | `START TRANSACTION` … `COMMIT`, con un `EXIT HANDLER` que hace `ROLLBACK` y `RESIGNAL` ante cualquier error |
-
-Validaciones adicionales: cantidad mayor que cero, venta existente, producto incluido en la venta y venta en estado `'Entregado'` o `'Devolución Parcial'`. La fila de la venta se bloquea con `FOR UPDATE` para que dos devoluciones simultáneas no puedan superar juntas lo comprado.
-
-Las pruebas (casos correctos y de error) están comentadas al final del script.
